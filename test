@@ -1,0 +1,134 @@
+Guava Cache介绍
+当项目中需要使用local cache的时候，一般都会通过基于 ConcurrentHashMap或者LinkedHashMap来实现自己的LRU Cache。在造轮子过程中，一般都需要解决一下问题：
+
+    1. 内存是有限了，所以需要限定缓存的最大容量.
+
+    2. 如何清除“太旧”的缓存entry.
+
+    3. 如何应对并发读写.
+
+    4.缓存数据透明化：命中率、失效率等.
+
+   cache的优劣基本取决于如何优雅高效地解决上面这些问题。Guava cache很好地解决了这些问题，是一个非常好的本地缓存，线程安全，功能齐全，简单易用，性能好。整体上来说Guava cache 是本地缓存的不二之选。    
+
+先来看看Guava的cache 提供了那些特性：
+
+    1. automatic loading of entries into the cache;
+
+    2. least-recently-used eviction when a maximum size is exceeded;
+
+    3. time-based expiration of entries, measured since last access or last write;
+
+    4. keys automatically wrapped in WeakReference;
+
+    5. values automatically wrapped in WeakReference or SoftReference soft;
+
+    6. notification of evicted (or otherwise removed) entries;
+
+    7. accumulation of cache access statistics.
+
+    以上这些特性都是可选的，可以通过CacheBuilder的build pattern来组合上面的这些特性，定制自己的cache，下面是一个简单地例子：
+```javascript
+LoadingCache<Key, Graph> graphs = CacheBuilder.newBuilder()
+        .maximumSize(1000).expireAfterWrite(10, TimeUnit.MINUTES)
+        .removalListener(MY_LISTENER)
+        .build(new CacheLoader<Key, Graph>() {
+            public Graph load(Key key) throws AnyException {
+                return createExpensiveGraph(key);
+            }
+        });
+```
+接下来，我们从多个角度来介绍如何使用Guava cache。
+
+​ <h3> **一、创建cache**
+
+   一般来说，在工作中我们一般这样使用remote cache或者local cache：
+
+```javascript
+User user = cache.get(usernick);
+if(user == null){
+    user = userDao.getUser(usernick);
+    cache.put(usernick, user);
+}
+
+return user;
+```
+即if cached, return; otherwise create/load/compute, cache and return。
+而Guava cache 通过下面两种方式以一种更优雅的方式实现了这个逻辑：
+
+    1. From A CacheLoader
+
+    2. From A Callable
+
+    通过这两种方法创建的cache，和普通的用map缓存相比，不同在于，都实现了上面提到的——“if cached, return; otherwise create/load/compute, cache and return”。但不同的在于cacheloader的定义比较宽泛，是针对整个cache定义的，可以认为是统一的根据key值load value的方法。而callable的方式较为灵活，允许你在get的时候指定。举两个栗子来介绍如何使用这两种方式
+
+<h3>**From CacheLoader：**
+```javascript
+LoadingCache<String, String> graphs = CacheBuilder.newBuilder().maximumSize(1000)
+          .build(new CacheLoader<String, String>() {
+              public String load(String key) {
+                  // 这里是key根据实际去取值的方法，例如根据这个key去数据库或者通过复杂耗时的计算得出
+                  System.out.println("no cache,load from db");
+                  return "123";
+              }
+          });
+  String val1 = graphs.get("key");
+  System.out.println("1 value is: " + val1);
+  String val2 = graphs.get("key");
+  System.out.println("2 value is: " + val2);
+```
+<h3>**From Callable**
+```javascript
+Cache<String, String> cache = CacheBuilder.newBuilder()
+        .maximumSize(1000).build();
+String val1 = cache.get("key", new Callable<String>() {
+    public String call() {
+        // 这里是key根据实际去取值的方法，例如根据这个key去数据库或者通过复杂耗时的计算得出
+        System.out.println("val call method is invoked");
+        return "123";
+    }
+});
+System.out.println("1 value is: " + val1);
+String val2 = cache.get("testKey", new Callable<String>() {
+    public String call() {
+        // 这里是key根据实际去取值的方法，例如根据这个key去数据库或者通过复杂耗时的计算得出
+        System.out.println("val call method is invoked");
+        return "123";
+    }
+});
+System.out.println("2 value is: " + val2);
+```
+
+需要注意的是，所有的Guava caches，不论是否是loader模式，都支持get(Key,Callable<V>)方法。
+
+    另外，除了上述这两种方式来更新缓存外，Guava cache当然也支持Inserted Directly:Values也可以通过cache.put(key,value)直接将值插入到cache中。该方法将覆盖key对应的entry。
+
+​
+<h3>**二、缓存移除**
+
+内存是有限，所以不能把所有的东西都加载到内存中，过大的local cache对任何java应用来说都是噩梦。因此local cache必须提供不同的机制来清除“不必要”的缓存entry，平衡内存使用率和命中率。Guava Cache提供了3中缓存清除策略：`size-based eviction, time-based eviction, and reference-based eviction.size-based eviction`：基于cache容量的移除。如果你的cache不允许扩容,即不允许超过设定的最大值，那么使用`CacheBuilder.maxmuSize(long)`即可。在这种条件下，cache会自己释放掉那些最近没有或者不经常使用的entries内存。这里需要注意一下两点：
+
+    1.并不是在超过限定时才会删除掉那些entries，而是在即将达到这个限定值时，那么你就要小心考虑这种情况了，因为很明显即使没有达到这个限定值，cache仍然会进行删除操作。
+
+    2.如果一个key-entry已经被移除了，当你再次调用get(key)时，如果CacheBuilder采用的是CacheLoader模式，那依然会从cacheLoader中加载一次。
+
+  此外，如果你的cache里面的entries有着截然不同的内存占用如果你的cache values有着截然不同的内存占用，你可以通过CacheBuilder.weigher(Weigher)来为不同的entry设定weigh，然后使用CacheBuilder.maximumWeight(long)设定一个最大值。举个栗子，在tpn会通过local cache缓存用户对消息类目的订阅信息，有的用户订阅的消息类目比较多，所占的内存就比较多，有的用户订阅的消息类目比较少，自然占用的内存就比较少。那么我就可以通过下面的方法来根据用户订阅的消息类目数量设置不同的weight，这样就可以在不更改cache大小的情况下，使得缓存尽量覆盖更多地用户：
+```javascrpit
+LoadingCache<Key, User> Users= CacheBuilder.newBuilder()
+.maximumWeight(100000)
+.weigher(new Weigher<Key, User>() {
+   public int weigh(Key k, User u) {
+        if(u.categories().szie() >5){
+             return 2;
+        }else{
+             return 1;
+        }
+   }
+ })
+.build(
+    new CacheLoader<Key, User>() {
+      public Userload(Key key) { // no checked exception
+        return createExpensiveUser(key);
+      }
+    });
+```
